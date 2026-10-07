@@ -148,17 +148,24 @@ export class Repo {
       const p = spawn('git', ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', ...args], {
         cwd: cwd ?? this.dir,
         env: { ...process.env, GIT_DIR: this.dir, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', ...env },
+        // No input: no stdin pipe, which git may close before we write (EPIPE).
+        stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       });
       const out: Buffer[] = [];
       const err: Buffer[] = [];
-      p.stdout.on('data', (d: Buffer) => out.push(d));
-      p.stderr.on('data', (d: Buffer) => err.push(d));
+      p.stdout!.on('data', (d: Buffer) => out.push(d));
+      p.stderr!.on('data', (d: Buffer) => err.push(d));
       p.on('error', reject);
       p.on('close', (code) => {
         if (code !== 0 && !allowFail) reject(new Error(`git ${args[0]}: ${Buffer.concat(err).toString().trim()}`));
         else resolve({ code: code ?? 1, out: Buffer.concat(out) });
       });
-      p.stdin.end(input ?? '');
+      if (p.stdin) {
+        // Git exiting before reading all input fails the command through its exit code; the
+        // write error itself must not crash the server.
+        p.stdin.on('error', () => {});
+        p.stdin.end(input);
+      }
     });
   }
 }
