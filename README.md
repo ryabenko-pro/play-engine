@@ -282,3 +282,7 @@ src/games/tanks/ example game: project builder, actor scripts, sprites (tanks.ht
   continuous (non-grid) pushing for platformers.
 - Tilemaps, one-way platforms.
 - Store assets in IndexedDB instead of localStorage (large images).
+
+## License
+
+[MIT](LICENSE)
