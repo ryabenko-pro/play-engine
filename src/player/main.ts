@@ -1,8 +1,6 @@
-import { AssetStore } from '../engine/assets';
-import { Game } from '../engine/game';
-import { Input } from '../engine/input';
-import { Renderer } from '../engine/renderer';
+import { migrateProject } from '../engine/migrate';
 import type { Project } from '../engine/types';
+import { runGame } from './run';
 
 interface PlayPayload {
   project: Project;
@@ -16,11 +14,21 @@ interface PlayPayload {
 async function loadPayload(): Promise<PlayPayload> {
   if (new URLSearchParams(location.search).get('source') === 'editor') {
     const raw = localStorage.getItem('ge.play');
-    if (raw) return JSON.parse(raw) as PlayPayload;
+    if (raw) {
+      const payload = JSON.parse(raw) as { project: unknown; sceneId?: string };
+      return { project: checked(migrateProject(payload.project)), sceneId: payload.sceneId };
+    }
   }
-  const res = await fetch('./project.json');
+  // ?v=<version>: an older version of a shared project (the sync server serves it).
+  const v = new URLSearchParams(location.search).get('v');
+  const res = await fetch(v ? `./project.json?v=${encodeURIComponent(v)}` : './project.json');
   if (!res.ok) throw new Error(`project.json: HTTP ${res.status}`);
-  return { project: (await res.json()) as Project };
+  return { project: checked(migrateProject(await res.json())) };
+}
+
+function checked(p: Project | null): Project {
+  if (!p) throw new Error('not a project file (or from a newer version)');
+  return p;
 }
 
 async function main(): Promise<void> {
@@ -33,37 +41,8 @@ async function main(): Promise<void> {
     status.textContent = `Could not load game: ${(err as Error).message}`;
     return;
   }
-  const { project } = payload;
-  document.title = project.name;
-  const assets = new AssetStore(project.assets);
-  const input = new Input();
-  input.attach();
-  const game = new Game(project, payload.sceneId ?? project.mainSceneId, assets, input, {
-    zoom: 1.5,
-    onLog: (m) => console.log(m),
-  });
-  const renderer = new Renderer(canvas.getContext('2d')!, assets);
-  const vp = { width: 0, height: 0 };
-  let dpr = 1;
-  const resize = () => {
-    dpr = window.devicePixelRatio || 1;
-    vp.width = window.innerWidth;
-    vp.height = window.innerHeight;
-    canvas.width = Math.round(vp.width * dpr);
-    canvas.height = Math.round(vp.height * dpr);
-  };
-  window.addEventListener('resize', resize);
-  resize();
   status.remove();
-
-  let last = performance.now();
-  const loop = (t: number) => {
-    game.frame((t - last) / 1000);
-    last = t;
-    game.render(renderer, vp, dpr);
-    requestAnimationFrame(loop);
-  };
-  requestAnimationFrame(loop);
+  runGame(canvas, payload.project, payload.sceneId);
 }
 
 void main();

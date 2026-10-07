@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>Tower Defence</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #status { position: fixed; inset: 0; display: grid; place-items: center; color: #aaa; font: 14px system-ui, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <div id="status">Loading…</div>
+    <script type="module" src="/src/games/td/main.ts"></script>
+  </body>
+</html>

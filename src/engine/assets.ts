@@ -20,6 +20,8 @@ export interface FrameRect {
 
 export interface SpriteFrames {
   frameAt(sprite: Animations, anim: string, time: number): number;
+  /** Seconds for one pass of the animation (Infinity if it has no frames or fps). */
+  animDuration(sprite: Animations, anim: string): number;
   frameRect(sheet: SpriteSheet, index: number): FrameRect | null;
 }
 
@@ -108,6 +110,13 @@ export class AssetStore implements AssetLookup, ImageProvider, SpriteFrames {
     let i = Math.floor(time * Math.max(0, a.fps));
     i = a.loop ? i % frames.length : Math.min(i, frames.length - 1);
     return frames[i];
+  }
+
+  animDuration(sprite: Animations, anim: string): number {
+    const a = findAnim(sprite, anim);
+    if (!a || a.fps <= 0) return Infinity;
+    const n = this.frames(a).length;
+    return n ? n / a.fps : Infinity;
   }
 
   frameRect(sheet: SpriteSheet, index: number): FrameRect | null {

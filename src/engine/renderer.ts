@@ -1,15 +1,12 @@
 import type { AssetLookup, ImageProvider, SpriteFrames } from './assets';
 import type { Camera, Viewport } from './camera';
+import { type WorldBody, halfExtents } from './runtime';
 import { DEG2RAD, type Vec2, rotate } from './math';
 import { depthOf, project, unproject } from './projection';
 import type {
-  AnimationSet,
   Colored,
-  Controllable,
   Entity,
   Extruded,
-  HasBody,
-  Mortal,
   Positioned,
   ProjectileAsset,
   ProjectileEntity,
@@ -28,14 +25,26 @@ export interface Box {
   h: number;
 }
 
-/** Runtime-only look of a character; the editor draws without it. */
-export interface CharacterVisual {
+/** How an actor looks this frame. */
+export interface ActorVisual {
   facing: number;
   anim: string;
   animTime: number;
-  health: number;
-  aiActive: boolean;
-  hurt: number;
+  /** Blink time left. */
+  flash: number;
+  /** Fill colour for sprite-less actors. */
+  color: string;
+  /** Current collider in the world (drawn when there is no sprite). */
+  body: WorldBody;
+  /** Squash (> 0: wider and flatter) or stretch (< 0) around the feet. */
+  squash?: number;
+  /** Opacity, e.g. for trail afterimages. */
+  alpha?: number;
+}
+
+/** Squash amount of the wobble effect at a time; `seed` desynchronizes actors. */
+export function wobble(amount: number, time: number, seed = 0): number {
+  return amount ? amount * Math.sin(time * 11 + seed * 0.37) : 0;
 }
 
 export interface Particle extends Positioned {
@@ -53,7 +62,7 @@ export interface OrderKey {
 export type RenderAssets = AssetLookup & ImageProvider & SpriteFrames;
 
 type DrawableBlock = Positioned & Rotatable & Shaped & Colored & Solid & Extruded & Textured;
-type DrawableCharacter = Positioned & HasBody & Colored & SpriteVisual & AnimationSet & Mortal & Pick<Controllable, 'control'>;
+type DrawableActor = Positioned & SpriteVisual;
 
 const CIRCLE_SEGMENTS = 32;
 
@@ -87,8 +96,16 @@ function blockCenter(b: Positioned & Shaped): Vec2 {
   return b.shape.kind === 'line' ? { x: b.x + b.shape.x2 / 2, y: b.y + b.shape.y2 / 2 } : { x: b.x, y: b.y };
 }
 
+export function characterOrderKey(view: ViewMode, p: Positioned): OrderKey {
+  return { layer: 1, depth: depthOf(view, p) };
+}
+
+/** Zones lie on the ground, paths on top of them; both under everything standing there. */
+const MAP_LAYER = { zone: 0.4, path: 0.5 } as const;
+
 export function entityOrderKey(view: ViewMode, e: Entity): OrderKey {
-  if (view === 'side') return { layer: e.type === 'block' ? 0 : e.type === 'character' ? 1 : 2, depth: 0 };
+  if (e.type === 'zone' || e.type === 'path') return { layer: MAP_LAYER[e.type], depth: 0 };
+  if (view === 'side') return { layer: e.type === 'block' ? 0 : e.type === 'instance' ? 1 : 2, depth: 0 };
   if (e.type === 'block') {
     const flat = e.height <= 0 && e.shape.kind !== 'line';
     return { layer: flat ? 0 : 1, depth: depthOf(view, blockCenter(e)) };
@@ -251,82 +268,112 @@ export class Renderer {
     ctx.restore();
   }
 
-  drawCharacter(e: DrawableCharacter, st?: CharacterVisual): Box {
+  /** A path (road) through world points: a dark edge and a coloured band of `width` px. */
+  drawPath(pts: readonly Vec2[], width: number, color: string, alpha = 1): void {
+    if (pts.length < 2) return;
+    const ctx = this.ctx;
+    const line = () => {
+      ctx.beginPath();
+      pts.forEach((w, i) => {
+        const p = this.P(w);
+        if (i) ctx.lineTo(p.x, p.y);
+        else ctx.moveTo(p.x, p.y);
+      });
+    };
+    ctx.save();
+    ctx.globalAlpha *= alpha;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    const w = Math.max(1 / this.zoom, width);
+    line();
+    ctx.strokeStyle = shade(color, 0.65);
+    ctx.lineWidth = w + 3 / this.zoom;
+    ctx.stroke();
+    line();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = w;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** A zone: a translucent area with a dashed outline. */
+  drawZone(pts: readonly Vec2[], color: string, alpha = 1): void {
+    if (pts.length < 3) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha *= alpha;
+    this.polygon(pts.map((p) => this.P(p)));
+    ctx.globalAlpha *= 0.3;
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.globalAlpha /= 0.3;
+    ctx.setLineDash([6 / this.zoom, 4 / this.zoom]);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5 / this.zoom;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  drawActor(e: DrawableActor, st: ActorVisual): Box {
     const ctx = this.ctx;
     const p = this.P(e);
-    const facing = st?.facing ?? 1;
-    const size = e.collider.kind === 'rect' ? e.collider.w : e.collider.r * 2;
+    const ext = halfExtents(st.body.shape);
     ctx.save();
-    if (st && st.hurt > 0 && Math.floor(st.hurt * 20) % 2 === 0) ctx.globalAlpha = 0.45;
-
-    if (this.view !== 'side') {
-      ctx.beginPath();
-      ctx.ellipse(p.x, p.y, size * 0.6, size * (this.view === 'isometric' ? 0.3 : 0.45), 0, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(0,0,0,0.3)';
-      ctx.fill();
+    ctx.globalAlpha = st.alpha ?? 1;
+    if (st.flash > 0 && Math.floor(st.flash * 20) % 2 === 0) ctx.globalAlpha *= 0.4;
+    if (st.squash) {
+      // Deform around the feet: the bottom of the collider (side), the ground point otherwise.
+      const feet = this.view === 'side' ? this.P({ x: st.body.x, y: st.body.y + ext.y }) : p;
+      ctx.translate(feet.x, feet.y);
+      ctx.scale(1 + st.squash, 1 - st.squash);
+      ctx.translate(-feet.x, -feet.y);
     }
 
-    let box: Box;
     const sprite = this.assets.get(e.spriteId, 'sprite');
-    const fr = sprite ? this.assets.frameRect(sprite, this.assets.frameAt(sprite, st?.anim ?? e.animIdle, st?.animTime ?? 0)) : null;
+    const fr = sprite ? this.assets.frameRect(sprite, this.assets.frameAt(sprite, st.anim, st.animTime)) : null;
+    let box: Box;
     if (sprite && fr) {
+      if (this.view !== 'side') {
+        ctx.beginPath();
+        ctx.ellipse(p.x, p.y, ext.x * 1.2, ext.x * (this.view === 'isometric' ? 0.6 : 0.9), 0, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fill();
+      }
       const dw = fr.sw * e.spriteScale;
       const dh = fr.sh * e.spriteScale;
       const dx = p.x - sprite.originX * dw;
-      const dy = p.y - sprite.originY * dh + e.spriteOffsetY;
+      // In isometric view the position is the ground point, so the sprite stands on it.
+      const anchorY = this.view === 'isometric' ? dh : sprite.originY * dh;
+      const dy = p.y - anchorY + e.spriteOffsetY;
       ctx.imageSmoothingEnabled = false;
-      if (facing < 0) {
+      if (st.facing < 0) {
         ctx.translate(p.x * 2, 0);
         ctx.scale(-1, 1);
       }
       ctx.drawImage(fr.img, fr.sx, fr.sy, fr.sw, fr.sh, dx, dy, dw, dh);
-      box = { x: facing < 0 ? 2 * p.x - dx - dw : dx, y: dy, w: dw, h: dh };
+      box = { x: st.facing < 0 ? 2 * p.x - dx - dw : dx, y: dy, w: dw, h: dh };
     } else {
-      box = this.drawCharacterShape(e, p, facing, size);
+      box = this.drawBodyShape(st.body, st.color);
     }
     ctx.restore();
-
-    if (st && st.health > 0 && st.health < e.maxHealth) {
-      const w = Math.max(24, box.w);
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(box.x + box.w / 2 - w / 2, box.y - 8, w, 4);
-      ctx.fillStyle = '#6ee07a';
-      ctx.fillRect(box.x + box.w / 2 - w / 2, box.y - 8, (w * st.health) / e.maxHealth, 4);
-    }
-    if (st?.aiActive && e.control === 'player') {
-      ctx.font = 'bold 10px system-ui, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillStyle = '#ffd166';
-      ctx.fillText('AI', box.x + box.w / 2, box.y - 12);
-    }
     return box;
   }
 
-  /** Fallback look for characters without a sprite. */
-  private drawCharacterShape(e: DrawableCharacter, p: Vec2, facing: number, size: number): Box {
+  /** Actors without a sprite are drawn as their current collider, in their current colour. */
+  private drawBodyShape(b: WorldBody, color: string): Box {
     const ctx = this.ctx;
-    let box: Box;
-    if (this.view === 'isometric') {
-      const h = size * 1.8;
-      box = { x: p.x - size / 2, y: p.y - h, w: size, h };
-    } else if (e.collider.kind === 'rect') {
-      box = { x: p.x - e.collider.w / 2, y: p.y - e.collider.h / 2, w: e.collider.w, h: e.collider.h };
-    } else {
-      box = { x: p.x - e.collider.r, y: p.y - e.collider.r, w: size, h: size };
-    }
-    ctx.beginPath();
-    if (this.view !== 'isometric' && e.collider.kind === 'circle') ctx.arc(p.x, p.y, e.collider.r, 0, Math.PI * 2);
-    else ctx.roundRect(box.x, box.y, box.w, box.h, Math.min(6, box.w / 3));
-    ctx.fillStyle = e.color;
+    const pts = shapeOutline({ x: b.x, y: b.y, rotation: 0, shape: b.shape }).map((q) => this.P(q));
+    this.polygon(pts);
+    ctx.fillStyle = color;
     ctx.fill();
-    ctx.strokeStyle = shade(e.color, 0.6);
+    ctx.strokeStyle = shade(color, 0.6);
     ctx.lineWidth = 1.5 / this.zoom;
     ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(box.x + box.w / 2 + facing * box.w * 0.22, box.y + box.h * 0.3, Math.max(2, box.w * 0.12), 0, Math.PI * 2);
-    ctx.fillStyle = '#fff';
-    ctx.fill();
-    return box;
+    const xs = pts.map((q) => q.x);
+    const ys = pts.map((q) => q.y);
+    const minX = Math.min(...xs);
+    const minY = Math.min(...ys);
+    return { x: minX, y: minY, w: Math.max(...xs) - minX, h: Math.max(...ys) - minY };
   }
 
   drawProjectile(pos: Positioned, vel: Positioned, asset: ProjectileAsset | undefined, time: number): Box {

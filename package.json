@@ -5,17 +5,20 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && vite build -c vite.server.config.ts",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "server": "node dist-server/server.js"
   },
   "devDependencies": {
+    "@types/node": "^26.6.4",
     "typescript": "^7.0.2",
     "vite": "^8.3.1",
     "vitest": "^5.0.1"
   },
   "dependencies": {
+    "fflate": "^0.8.3",
     "sucrase": "^3.35.1"
   }
 }
